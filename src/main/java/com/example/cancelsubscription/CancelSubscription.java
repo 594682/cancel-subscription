@@ -1,6 +1,10 @@
 package com.example.cancelsubscription;
 
 import java.util.UUID;
+import java.util.Random;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.gui.GuiGraphics;
@@ -29,11 +33,18 @@ public class CancelSubscription {
     private static final String SUB_KEY = "cancel_subscription_active";
     private static final String TOTAL_KEY = "cancel_subscription_paid";
     private static final int COST = 10;
+    private static final String DEBT_KEY = "subscription_debt";
+    private static final String DEADLINE_KEY = "subscription_deadline";
+    private static final String BANK_KEY = "subscription_bank";
+    private static final String CLAIM_KEY = "subscription_claim_count";
+    private static final String ORGAN_KEY = "subscription_organ_loss";
+    private static final Random RNG = new Random();
     private static final KeyMapping OPEN = new KeyMapping(
-        "打开取消订阅中心", GLFW.GLFW_KEY_O, "取消订阅");
+        "打开订阅中心", GLFW.GLFW_KEY_O, "订阅");
 
     private static int queuedSounds = 0;
     private static long lastNoticeTick = -1000;
+    private static long lastBlockChargeTick = -1;
 
     public CancelSubscription(net.neoforged.bus.api.IEventBus bus) {
         bus.addListener(this::registerKeys);
@@ -64,12 +75,8 @@ public class CancelSubscription {
         return total;
     }
 
-    private static boolean charge(ServerPlayer player, String reason) {
-        if (!active(player) || emeraldCount(player) < COST) {
-            if (active(player)) notifyPlayer(player, "余额不足！本次" + reason + "扣费失败");
-            return false;
-        }
-        int remaining = COST;
+    private static void takeEmeralds(ServerPlayer player, int amount) {
+        int remaining = amount;
         for (int i = 0; i < player.getInventory().getContainerSize() && remaining > 0; i++) {
             ItemStack stack = player.getInventory().getItem(i);
             if (!stack.is(Items.EMERALD)) continue;
@@ -78,10 +85,103 @@ public class CancelSubscription {
             remaining -= take;
         }
         player.getInventory().setChanged();
+    }
+
+    private static boolean charge(ServerPlayer player, String reason) {
+        if (!active(player)) return false;
+        int debt = player.getPersistentData().getInt(DEBT_KEY);
+        if (debt > 0) return false; // No cascading charges while a debt is pending.
+        if (emeraldCount(player) < COST) {
+            player.getPersistentData().putInt(DEBT_KEY, COST);
+            player.getPersistentData().putLong(DEADLINE_KEY, player.level().getGameTime() + 200);
+            notifyPlayer(player, "欠费10绿宝石！10秒内还款，否则触发随机器官惩罚");
+            return false;
+        }
+        takeEmeralds(player, COST);
         player.getPersistentData().putInt(TOTAL_KEY,
             player.getPersistentData().getInt(TOTAL_KEY) + COST);
-        notifyPlayer(player, reason + "：自动扣除 " + COST + " 绿宝石！");
+        notifyPlayer(player, reason + "：自动扣除10绿宝石！");
         return true;
+    }
+
+    @SubscribeEvent
+    public void onPlayerTick(PlayerTickEvent.Post event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) return;
+        int debt = player.getPersistentData().getInt(DEBT_KEY);
+        if (debt <= 0) return;
+        // Countdown uses world ticks, so it only advances while the world runs.
+        if (emeraldCount(player) >= debt) {
+            takeEmeralds(player, debt);
+            player.getPersistentData().putInt(DEBT_KEY, 0);
+            player.getPersistentData().remove(DEADLINE_KEY);
+            notifyPlayer(player, "还款成功，债务清零");
+            return;
+        }
+        if (player.level().getGameTime() >= player.getPersistentData().getLong(DEADLINE_KEY)) {
+            player.getPersistentData().putInt(DEBT_KEY, 0);
+            player.getPersistentData().remove(DEADLINE_KEY);
+            int organ = RNG.nextInt(4);
+            player.getPersistentData().putInt(ORGAN_KEY, organ + 1);
+            switch (organ) {
+                case 0 -> player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, 20 * 60, 0));
+                case 1 -> player.addEffect(new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, 20 * 60, 1));
+                case 2 -> player.addEffect(new MobEffectInstance(MobEffects.DIG_SLOWDOWN, 20 * 60, 1));
+                default -> player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 20 * 60, 1));
+            }
+            notifyPlayer(player, "逾期！随机器官抵押生效（负面效果持续60秒）");
+        }
+    }
+
+    private static void claim() {
+        Minecraft mc = Minecraft.getInstance();
+        MinecraftServer server = mc.getSingleplayerServer();
+        ServerPlayer player = singlePlayer();
+        if (server == null || player == null) return;
+        UUID id = player.getUUID();
+        server.execute(() -> {
+            ServerPlayer p = server.getPlayerList().getPlayer(id);
+            if (p == null) return;
+            // One claim per player, persisted to player data.
+            if (p.getPersistentData().getInt(CLAIM_KEY) > 0) {
+                notifyPlayer(p, "索赔申请已处理，每位玩家限一次");
+                return;
+            }
+            p.getPersistentData().putInt(CLAIM_KEY, 1);
+            int roll = RNG.nextInt(10000);
+            long prize = roll == 0 ? 100000000L :
+                roll < 500 ? 10000L : roll < 2000 ? 100L :
+                roll < 5000 ? 10L : 0L;
+            p.getPersistentData().putLong(BANK_KEY,
+                p.getPersistentData().getLong(BANK_KEY) + prize);
+            notifyPlayer(p, prize == 0 ? "索赔被驳回！" : "索赔成功！虚拟银行入账 " + prize + " 绿宝石");
+        });
+    }
+
+    private static void withdraw() {
+        Minecraft mc = Minecraft.getInstance();
+        MinecraftServer server = mc.getSingleplayerServer();
+        ServerPlayer player = singlePlayer();
+        if (server == null || player == null) return;
+        UUID id = player.getUUID();
+        server.execute(() -> {
+            ServerPlayer p = server.getPlayerList().getPlayer(id);
+            if (p == null) return;
+            long balance = p.getPersistentData().getLong(BANK_KEY);
+            if (balance <= 0) { notifyPlayer(p, "虚拟银行没有余额"); return; }
+            int room = 0;
+            for (int i = 0; i < p.getInventory().getContainerSize(); i++) {
+                ItemStack stack = p.getInventory().getItem(i);
+                if (stack.isEmpty()) room += 64;
+                else if (stack.is(Items.EMERALD)) room += Math.max(0, 64 - stack.getCount());
+            }
+            int amount = (int)Math.min(Math.min(balance, 64L), room);
+            if (amount <= 0) { notifyPlayer(p, "背包空间不足"); return; }
+            ItemStack stack = new ItemStack(Items.EMERALD, amount);
+            p.getInventory().add(stack);
+            int delivered = amount - stack.getCount();
+            p.getPersistentData().putLong(BANK_KEY, balance - delivered);
+            notifyPlayer(p, "已提取 " + delivered + " 颗绿宝石");
+        });
     }
 
     private static void notifyPlayer(ServerPlayer player, String message) {
@@ -134,7 +234,10 @@ public class CancelSubscription {
         if (server == null || level.getServer() != server) return;
         for (ServerPlayer player : level.players()) {
             if (player.blockPosition().distSqr(event.getPos()) <= 256) {
-                charge(player, "方块更新服务");
+                if (level.getGameTime() != lastBlockChargeTick) {
+                    lastBlockChargeTick = level.getGameTime();
+                    charge(player, "方块更新服务");
+                }
             }
         }
     }
@@ -176,67 +279,95 @@ public class CancelSubscription {
     public static class SubscriptionScreen extends Screen {
         private final int stage;
         private static final String[] PROMPTS = {
-            "超级尊贵会员：10绿宝石开通，之后按事件续费",
-            "您确定要放弃尊贵身份吗？",
-            "限时挽留：您的专属权益即将消失！",
-            "温馨提示：退订可能影响您的幸福指数",
-            "满意度调查：您为什么要离开我们？",
-            "确认一下：您真的不是误触吗？",
-            "客服正在排队处理您的申请……",
-            "系统检测到您有未使用的空气权益",
-            "取消前，请认真阅读三遍服务协议",
-            "最后一次机会：留下来有惊喜！",
-            "您已到达取消订阅的最后一步",
-            "取消成功！您已获得自由！"
+            "999纯金会员 · 每次事件收费10绿宝石",
+            "您真的要离开至尊黄金会员吗？",
+            "您的专属黄金权益即将失效！",
+            "今日限定：再考虑一下吧？",
+            "您离开的原因我们非常重视",
+            "再确认一次，真的不是误触？",
+            "尊贵客服为您送来挽留祝福",
+            "您尚有大量空气权益未使用",
+            "请审阅尊贵会员服务条款",
+            "您的黄金身份即将被封存",
+            "最后一次确认退订申请",
+            "退订成功：新账单已停止"
         };
-
         public SubscriptionScreen(int stage) {
-            super(Component.literal("取消订阅比加入组织还难"));
+            super(Component.literal("订阅"));
             this.stage = stage;
         }
-
         @Override protected void init() {
             int cx = width / 2;
+            int top = height / 2 - 3;
             ServerPlayer player = singlePlayer();
             if (player == null) {
-                addRenderableWidget(Button.builder(Component.literal("仅支持单人世界（返回）"),
-                    b -> onClose()).bounds(cx - 105, height / 2, 210, 20).build());
-            } else if (!active(player) && stage == 0) {
-                addRenderableWidget(Button.builder(Component.literal("开通会员（立即扣10绿宝石）"),
-                    b -> subscribe()).bounds(cx - 105, height / 2, 210, 20).build());
+                addRenderableWidget(Button.builder(Component.literal("仅支持单人世界 · 返回"),
+                    b -> onClose()).bounds(cx - 110, top, 220, 20).build());
+            } else if (stage == 12) {
+                addRenderableWidget(Button.builder(Component.literal("提交随机索赔申请"),
+                    b -> { claim(); Minecraft.getInstance().setScreen(new SubscriptionScreen(0)); })
+                    .bounds(cx - 110, top, 220, 20).build());
+                addRenderableWidget(Button.builder(Component.literal("返回会员中心"),
+                    b -> Minecraft.getInstance().setScreen(new SubscriptionScreen(0)))
+                    .bounds(cx - 110, top + 30, 220, 20).build());
             } else if (stage == 0) {
-                addRenderableWidget(Button.builder(Component.literal("申请取消自动续费"),
-                    b -> Minecraft.getInstance().setScreen(new SubscriptionScreen(1)))
-                    .bounds(cx - 105, height / 2, 210, 20).build());
+                if (!active(player)) {
+                    addRenderableWidget(Button.builder(Component.literal("开通黄金会员 · 10绿宝石"),
+                        b -> subscribe()).bounds(cx - 110, top, 220, 20).build());
+                } else {
+                    addRenderableWidget(Button.builder(Component.literal("会员管理 · 申请退订"),
+                        b -> Minecraft.getInstance().setScreen(new SubscriptionScreen(1)))
+                        .bounds(cx - 110, top, 220, 20).build());
+                }
+                addRenderableWidget(Button.builder(Component.literal("至尊索赔中心"),
+                    b -> Minecraft.getInstance().setScreen(new SubscriptionScreen(12)))
+                    .bounds(cx - 110, top + 28, 220, 20).build());
+                addRenderableWidget(Button.builder(Component.literal("从虚拟银行提取绿宝石（每次最多64）"),
+                    b -> withdraw()).bounds(cx - 110, top + 56, 220, 20).build());
             } else if (stage <= 10) {
-                addRenderableWidget(Button.builder(Component.literal("坚持取消（" + stage + "/10）"),
+                addRenderableWidget(Button.builder(Component.literal("坚持退订 · 第 " + stage + "/10 步"),
                     b -> {
                         if (stage == 10) {
                             unsubscribe();
                             Minecraft.getInstance().setScreen(new SubscriptionScreen(11));
-                        } else {
-                            Minecraft.getInstance().setScreen(new SubscriptionScreen(stage + 1));
-                        }
-                    }).bounds(cx - 105, height / 2, 210, 20).build());
-                addRenderableWidget(Button.builder(Component.literal("算了，继续享受会员"),
+                        } else Minecraft.getInstance().setScreen(new SubscriptionScreen(stage + 1));
+                    }).bounds(cx - 110, top, 220, 20).build());
+                addRenderableWidget(Button.builder(Component.literal("保留黄金会员身份"),
                     b -> Minecraft.getInstance().setScreen(new SubscriptionScreen(0)))
-                    .bounds(cx - 105, height / 2 + 32, 210, 20).build());
+                    .bounds(cx - 110, top + 28, 220, 20).build());
             } else {
-                addRenderableWidget(Button.builder(Component.literal("终于自由了！"),
-                    b -> onClose()).bounds(cx - 105, height / 2 + 20, 210, 20).build());
+                addRenderableWidget(Button.builder(Component.literal("返回"),
+                    b -> Minecraft.getInstance().setScreen(new SubscriptionScreen(0)))
+                    .bounds(cx - 110, top + 25, 220, 20).build());
             }
         }
-
-        @Override public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-            super.render(graphics, mouseX, mouseY, partialTick);
-            graphics.drawCenteredString(font, "取消订阅比加入组织还难",
-                width / 2, height / 2 - 66, 0xFFD966);
-            graphics.drawCenteredString(font, PROMPTS[stage],
-                width / 2, height / 2 - 38, 0xFFFFFF);
-            graphics.drawCenteredString(font, "O键打开 · 方块邻居更新/声音事件扣费 · 仅游戏绿宝石",
-                width / 2, height - 35, 0xAAAAAA);
+        @Override public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+            g.fill(0, 0, width, height, 0xF20D0B08);
+            int left = Math.max(10, width / 2 - 155), right = Math.min(width - 10, width / 2 + 155);
+            int top = Math.max(8, height / 2 - 94), bottom = Math.min(height - 8, height / 2 + 105);
+            g.fill(left - 3, top - 3, right + 3, bottom + 3, 0xFFB58520);
+            g.fill(left, top, right, bottom, 0xFF201709);
+            g.fill(left + 3, top + 3, right - 3, top + 6, 0xFFFFE39A);
+            g.fill(left + 3, bottom - 6, right - 3, bottom - 3, 0xFFD1A139);
+            g.drawCenteredString(font, "✦ 999 GOLD · 订阅 ✦", width / 2, top + 13, 0xFFFFD66E);
+            String message = stage == 12 ? "黄金索赔 · 最高一亿绿宝石（万分之一）" : PROMPTS[stage];
+            g.drawCenteredString(font, message, width / 2, top + 35, 0xFFFFE8B0);
+            ServerPlayer p = singlePlayer();
+            if (p != null) {
+                long bank = p.getPersistentData().getLong(BANK_KEY);
+                int debt = p.getPersistentData().getInt(DEBT_KEY);
+                g.drawCenteredString(font, "欠费: " + debt + "  |  虚拟银行: " + bank,
+                    width / 2, top + 54, 0xFFFFC96A);
+                if (debt > 0) {
+                    long ticks = Math.max(0, p.getPersistentData().getLong(DEADLINE_KEY) - p.level().getGameTime());
+                    g.drawCenteredString(font, "追债倒计时: " + ((ticks + 19) / 20) + "秒",
+                        width / 2, top + 67, 0xFFFF7777);
+                }
+            }
+            super.render(g, mouseX, mouseY, partialTick);
+            g.drawCenteredString(font, "O键开启 · 仅游戏内绿宝石 · 娱乐讽刺玩法",
+                width / 2, height - 14, 0xFFCEB77B);
         }
-
         @Override public boolean isPauseScreen() { return false; }
     }
 }

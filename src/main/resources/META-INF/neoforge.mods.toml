@@ -5,9 +5,10 @@ license="MIT"
 
 [[mods]]
 modId="cancelsubscription"
-version="1.2.0"
-displayName="取消订阅比加入组织还难"
-description="10绿宝石事件扣费，十关退订。"
+version="2.0.0"
+displayName="订阅"
+logoFile="subscription_icon.png"
+description="999纯金会员、自动扣费、十秒追债与随机索赔。"
 
 [[dependencies.cancelsubscription]]
 modId="neoforge"
