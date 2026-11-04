@@ -1,25 +1,24 @@
-
 modLoader="javafml"
 loaderVersion="[4,)"
 license="MIT"
 
 [[mods]]
 modId="cancelsubscription"
-version="2.0.0"
-displayName="订阅"
+version="2.2.0"
+displayName="订阅 · 空气 PRO"
 logoFile="subscription_icon.png"
-description="999纯金会员、自动扣费、十秒追债与随机索赔。"
+description="999纯金会员、空气PRO虚空物品、维权索赔和自动扣费。双端共用服务端权威逻辑。"
 
 [[dependencies.cancelsubscription]]
 modId="neoforge"
 type="required"
 versionRange="[21.1,)"
 ordering="NONE"
-side="CLIENT"
+side="BOTH"
 
 [[dependencies.cancelsubscription]]
 modId="minecraft"
 type="required"
 versionRange="[1.21.1,1.21.2)"
 ordering="NONE"
-side="CLIENT"
+side="BOTH"

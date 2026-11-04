@@ -1,4 +1,6 @@
 {
+  "key.cancelsubscription.open": "Open Subscription Center",
+  "key.categories.cancelsubscription": "Subscription",
   "item.cancelsubscription.vertical_slab": "Vertical Slab PRO",
   "item.cancelsubscription.horizontal_ladder": "Horizontal Ladder PRO",
   "item.cancelsubscription.water_slab": "Water Slab PRO",
